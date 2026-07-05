@@ -375,6 +375,19 @@
   border-color: var(--navy);
 }
 
+.availability-message {
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  color: var(--navy);
+  font-weight: 750;
+}
+
+.availability-error {
+  color: #9a2c2c;
+  background: #fdecec;
+  border-color: #e5a6a6;
+}
+
 .tournament-list {
   display: grid;
   gap: 6px;
@@ -606,6 +619,11 @@
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
+}
+
+.modal-response-groups {
+  margin-top: 14px;
+  grid-template-columns: 1fr;
 }
 
 .response-group h4 {

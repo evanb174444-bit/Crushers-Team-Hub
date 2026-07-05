@@ -198,49 +198,6 @@ export const players = rosterFromSheet.map((player) => ({
   ...player,
 }))
 
-const availabilityPlayers = players.map((player) => player.name)
-
-function getWeekendResponses() {
-  return availabilityPlayers.map((player) => ({ player, status: 'Yes' }))
-}
-
-function formatWeekendRange(startDate, endDate) {
-  const month = startDate.toLocaleString('en-US', { month: 'long' })
-  return `${month} ${startDate.getDate()}–${endDate.getDate()}`
-}
-
-function buildWeekendAvailability(referenceDate) {
-  const weekends = []
-  const year = referenceDate.getFullYear()
-  const firstDay = new Date(year, 8, 1)
-  const lastDay = new Date(year, 11, 31)
-  const cursor = new Date(firstDay)
-
-  while (cursor.getDay() !== 6) {
-    cursor.setDate(cursor.getDate() + 1)
-  }
-
-  while (cursor <= lastDay) {
-    const startDate = new Date(cursor)
-    const endDate = new Date(cursor)
-    endDate.setDate(startDate.getDate() + 1)
-
-    weekends.push({
-      id: startDate.toISOString().slice(0, 10),
-      dateRange: formatWeekendRange(startDate, endDate),
-      month: startDate.toLocaleString('en-US', { month: 'long' }),
-      startDate,
-      responses: getWeekendResponses(weekends.length),
-    })
-
-    cursor.setDate(cursor.getDate() + 7)
-  }
-
-  return weekends
-}
-
-export const weekendAvailability = buildWeekendAvailability(new Date())
-
 export const orderWindow = {
   title: 'Summer Practice Gear',
   startDate: 'June 15',

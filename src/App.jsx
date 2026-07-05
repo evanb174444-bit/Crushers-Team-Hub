@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Icon } from './components/Icon'
 import {
@@ -8,8 +8,8 @@ import {
   orderProducts,
   orderWindow,
   players,
-  weekendAvailability,
 } from './data/teamData'
+import { isSupabaseConfigured, supabase } from './lib/supabaseClient'
 import './App.css'
 
 const familyEditFields = [
@@ -28,6 +28,20 @@ const familyEditFields = [
   ['allergies', 'Player allergies'],
   ['address', 'Address'],
 ]
+
+const APP_TO_DB_RESPONSE = {
+  Yes: 'yes',
+  No: 'no',
+  'Sat Only': 'sat_only',
+  'Sun Only': 'sun_only',
+}
+
+const DB_TO_APP_RESPONSE = {
+  yes: 'Yes',
+  no: 'No',
+  sat_only: 'Sat Only',
+  sun_only: 'Sun Only',
+}
 
 function AppShell({ activePage, children, setActivePage }) {
   return (
@@ -86,6 +100,8 @@ function AppShell({ activePage, children, setActivePage }) {
 function AccountDropdown({ currentUser, onEditFamily, onSignOut }) {
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false)
   const menuRef = useRef(null)
+  const familyPlayers = currentUser.familyPlayers ?? []
+  const hasMultiplePlayers = familyPlayers.length > 1
 
   useEffect(() => {
     if (!isUserMenuOpen) {
@@ -132,6 +148,18 @@ function AccountDropdown({ currentUser, onEditFamily, onSignOut }) {
             <p>Viewing for: <strong>{currentUser.activePlayer.name}</strong></p>
             <p>Signed in as: <strong>{currentUser.email}</strong></p>
           </div>
+          {hasMultiplePlayers && familyPlayers.map((player) => (
+            <button
+              key={player.id}
+              type="button"
+              onClick={() => {
+                currentUser.setActivePlayerId(player.id)
+                setIsUserMenuOpen(false)
+              }}
+            >
+              View for {player.name}
+            </button>
+          ))}
           <button
             type="button"
             onClick={() => {
@@ -207,6 +235,10 @@ function getMonthTabs(weekends) {
 }
 
 function getDefaultWeekendMonth(weekends) {
+  if (weekends.length === 0) {
+    return ''
+  }
+
   const today = new Date()
   const upcomingWeekend = weekends
     .filter(({ startDate }) => startDate >= today)
@@ -215,34 +247,137 @@ function getDefaultWeekendMonth(weekends) {
   return upcomingWeekend?.month ?? weekends[0].month
 }
 
-function LoginScreen({ onLogin, rosterPlayers }) {
+function parseDatabaseDate(dateValue) {
+  return new Date(`${dateValue}T00:00:00`)
+}
+
+function formatWeekendRangeFromDatabase(startDateValue, endDateValue) {
+  const startDate = parseDatabaseDate(startDateValue)
+  const endDate = parseDatabaseDate(endDateValue)
+  const startMonth = startDate.toLocaleString('en-US', { month: 'long' })
+  const endMonth = endDate.toLocaleString('en-US', { month: 'long' })
+
+  if (startMonth === endMonth) {
+    return `${startMonth} ${startDate.getDate()}–${endDate.getDate()}`
+  }
+
+  return `${startMonth} ${startDate.getDate()}–${endMonth} ${endDate.getDate()}`
+}
+
+function getPlayerName(player) {
+  return `${player.first_name} ${player.last_name}`
+}
+
+function mapSupabasePlayerToAppPlayer(player, rosterPlayers) {
+  const name = getPlayerName(player)
+  const samplePlayer = rosterPlayers.find((rosterPlayer) => rosterPlayer.name === name)
+
+  return {
+    ...samplePlayer,
+    id: samplePlayer?.id ?? player.id,
+    supabaseId: player.id,
+    name,
+    number: player.jersey_number ?? samplePlayer?.number ?? '',
+    bats: player.bats ?? samplePlayer?.bats ?? '',
+    throws: player.throws ?? samplePlayer?.throws ?? '',
+    catches: player.catches == null ? samplePlayer?.catches ?? '' : player.catches ? 'Yes' : '',
+  }
+}
+
+async function loadSupabaseCurrentUser(session, rosterPlayers) {
+  if (!session?.user?.email) {
+    return { user: null, error: null }
+  }
+
+  const email = session.user.email.trim().toLowerCase()
+  const { data: family, error } = await supabase
+    .from('families')
+    .select(`
+      id,
+      email,
+      contact_email,
+      is_admin,
+      family_players(
+        player_id,
+        players(
+          id,
+          first_name,
+          last_name,
+          jersey_number,
+          bats,
+          throws,
+          catches,
+          sort_order,
+          status
+        )
+      )
+    `)
+    .or(`email.eq.${email},contact_email.eq.${email}`)
+    .maybeSingle()
+
+  if (error) {
+    return { user: null, error: error.message }
+  }
+
+  if (!family) {
+    await supabase.auth.signOut()
+    return { user: null, error: 'Email address not found on the team roster.' }
+  }
+
+  const familyPlayers = (family.family_players ?? [])
+    .map((link) => link.players)
+    .filter(Boolean)
+    .sort((a, b) => (a.sort_order ?? 100) - (b.sort_order ?? 100))
+    .map((player) => mapSupabasePlayerToAppPlayer(player, rosterPlayers))
+
+  if (familyPlayers.length === 0) {
+    await supabase.auth.signOut()
+    return { user: null, error: 'No player is connected to this family account.' }
+  }
+
+  return {
+    user: {
+      email: family.email,
+      contactEmail: family.contact_email,
+      familyId: family.id,
+      isAdmin: family.is_admin,
+      familyPlayers,
+      players: familyPlayers.map((player) => player.name),
+      activePlayer: familyPlayers[0],
+    },
+    error: null,
+  }
+}
+
+function LoginScreen({ initialError = '', onLogin }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [isPasswordVisible, setIsPasswordVisible] = useState(false)
-  const [error, setError] = useState('')
+  const [error, setError] = useState(initialError)
 
-  function handleSubmit(event) {
+  async function handleSubmit(event) {
     event.preventDefault()
 
-    const matchedPlayers = rosterPlayers.filter((player) => (
-      player.parentEmail.toLowerCase() === email.trim().toLowerCase()
-    ))
-
-    if (matchedPlayers.length === 0) {
-      setError('Email address not found on the team roster.')
+    if (!isSupabaseConfigured) {
+      setError('Supabase is not configured.')
       return
     }
 
-    if (password !== (matchedPlayers[0].password ?? 'Crushers')) {
-      setError('Incorrect password.')
-      return
-    }
-
-    onLogin({
-      email: matchedPlayers[0].parentEmail,
-      players: matchedPlayers.map((player) => player.name),
-      activePlayer: matchedPlayers[0],
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: email.trim().toLowerCase(),
+      password,
     })
+
+    if (error) {
+      setError(error.message || 'Unable to sign in.')
+      return
+    }
+
+    const profileError = await onLogin(data.session)
+
+    if (profileError) {
+      setError(profileError)
+    }
   }
 
   return (
@@ -290,34 +425,209 @@ function LoginScreen({ onLogin, rosterPlayers }) {
 }
 
 function AvailabilityPage({ currentUser, headerAction }) {
-  const currentPlayer = currentUser.activePlayer.name
-  const [expandedWeekends, setExpandedWeekends] = useState({})
-  const [weekendResponses, setWeekendResponses] = useState(() => (
-    Object.fromEntries(
-      weekendAvailability.map((weekend) => [weekend.id, weekend.responses]),
-    )
+  const [selectedResponseWeekendId, setSelectedResponseWeekendId] = useState(null)
+  const [weekends, setWeekends] = useState([])
+  const [weekendResponses, setWeekendResponses] = useState({})
+  const [isLoadingAvailability, setIsLoadingAvailability] = useState(true)
+  const [availabilityError, setAvailabilityError] = useState('')
+  const [savingWeekendId, setSavingWeekendId] = useState(null)
+  const currentFamilyId = currentUser.familyId
+  const activeFamilyPlayer = currentUser.familyPlayers?.find((player) => (
+    player.id === currentUser.activePlayer.id
+    || player.supabaseId === currentUser.activePlayer.supabaseId
+    || player.name === currentUser.activePlayer.name
   ))
-  const monthTabs = useMemo(() => getMonthTabs(weekendAvailability), [])
-  const [activeMonth, setActiveMonth] = useState(() => getDefaultWeekendMonth(weekendAvailability))
+  const currentPlayerId = activeFamilyPlayer?.supabaseId ?? currentUser.activePlayer.supabaseId
+  const monthTabs = useMemo(() => getMonthTabs(weekends), [weekends])
+  const [activeMonth, setActiveMonth] = useState('')
   const visibleWeekends = useMemo(
-    () => weekendAvailability.filter((weekend) => weekend.month === activeMonth),
-    [activeMonth],
+    () => weekends.filter((weekend) => weekend.month === activeMonth),
+    [activeMonth, weekends],
   )
+  const selectedResponseWeekend = weekends.find((weekend) => weekend.id === selectedResponseWeekendId)
+  const selectedResponseGroups = selectedResponseWeekend
+    ? Object.entries(groupResponses(weekendResponses[selectedResponseWeekend.id] ?? [])).filter(([, group]) => group.length > 0)
+    : []
 
-  function toggleWeekend(id) {
-    setExpandedWeekends((current) => ({
-      ...current,
-      [id]: !current[id],
-    }))
-  }
+  useEffect(() => {
+    let isMounted = true
 
-  function setPlayerResponse(weekendId, status) {
+    async function loadAvailability() {
+      if (!isSupabaseConfigured) {
+        setIsLoadingAvailability(false)
+        setAvailabilityError('Supabase is not configured. Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to your environment.')
+        return
+      }
+
+      setIsLoadingAvailability(true)
+      setAvailabilityError('')
+
+      try {
+        const { data: authData, error: authError } = await supabase.auth.getUser()
+        console.log('[Availability reload] auth email', authData.user?.email ?? currentUser.email)
+        console.log('[Availability reload] current family id', currentFamilyId)
+        console.log('[Availability reload] current player id', currentPlayerId)
+
+        if (authError) {
+          console.warn('[Availability reload] auth user lookup error', authError)
+        }
+
+        const [
+          weekendsResult,
+          playersResult,
+          responsesResult,
+        ] = await Promise.all([
+          supabase
+            .from('availability_weekends')
+            .select('id, weekend_start, weekend_end, month_label, season_year')
+            .eq('is_active', true)
+            .order('weekend_start', { ascending: true }),
+          supabase
+            .from('players')
+            .select('id, first_name, last_name, sort_order, status')
+            .eq('status', 'active')
+            .order('sort_order', { ascending: true }),
+          supabase
+            .from('availability_responses')
+            .select('id, weekend_id, player_id, response'),
+        ])
+
+        console.log('[Availability reload] weekends result/error', weekendsResult.data, weekendsResult.error)
+        console.log('[Availability reload] players result/error', playersResult.data, playersResult.error)
+        console.log('[Availability reload] responses result/error', responsesResult.data, responsesResult.error)
+
+        if (weekendsResult.error) throw weekendsResult.error
+        if (playersResult.error) throw playersResult.error
+        if (responsesResult.error) throw responsesResult.error
+
+        const databasePlayers = playersResult.data ?? []
+        const databaseWeekends = (weekendsResult.data ?? []).map((weekend) => ({
+          id: weekend.id,
+          dateRange: formatWeekendRangeFromDatabase(weekend.weekend_start, weekend.weekend_end),
+          month: weekend.month_label,
+          startDate: parseDatabaseDate(weekend.weekend_start),
+        }))
+        const responseLookup = new Map(
+          (responsesResult.data ?? []).map((response) => [
+            `${response.weekend_id}:${response.player_id}`,
+            response,
+          ]),
+        )
+        const responsesByWeekend = Object.fromEntries(
+          databaseWeekends.map((weekend) => [
+            weekend.id,
+            databasePlayers.map((player) => {
+              const savedResponse = responseLookup.get(`${weekend.id}:${player.id}`)
+
+              return {
+                id: savedResponse?.id,
+                playerId: player.id,
+                player: getPlayerName(player),
+                status: DB_TO_APP_RESPONSE[savedResponse?.response] ?? 'Yes',
+              }
+            }),
+          ]),
+        )
+
+        if (!isMounted) return
+
+        setWeekends(databaseWeekends)
+        setWeekendResponses(responsesByWeekend)
+        setActiveMonth((currentMonth) => {
+          const availableMonths = getMonthTabs(databaseWeekends)
+          return availableMonths.includes(currentMonth) ? currentMonth : getDefaultWeekendMonth(databaseWeekends)
+        })
+      } catch (error) {
+        if (!isMounted) return
+        setAvailabilityError(error.message || 'Unable to load availability from Supabase.')
+      } finally {
+        if (isMounted) {
+          setIsLoadingAvailability(false)
+        }
+      }
+    }
+
+    loadAvailability()
+
+    return () => {
+      isMounted = false
+    }
+  }, [currentFamilyId, currentPlayerId, currentUser.email])
+
+  async function setPlayerResponse(weekendId, status) {
+    console.log('[Availability save] auth email', currentUser.email)
+    console.log('[Availability save] current family id', currentFamilyId)
+    console.log('[Availability save] current player id', currentPlayerId)
+    console.log('[Availability save] weekend id', weekendId)
+    console.log('[Availability save] response value', APP_TO_DB_RESPONSE[status])
+
+    if (!currentPlayerId) {
+      setAvailabilityError('Unable to find the logged-in player in Supabase.')
+      console.error('[Availability save] missing current player id')
+      return
+    }
+
+    const previousResponses = weekendResponses[weekendId] ?? []
+
     setWeekendResponses((current) => ({
       ...current,
       [weekendId]: current[weekendId].map((response) => (
-        response.player === currentPlayer ? { ...response, status } : response
+        response.playerId === currentPlayerId ? { ...response, status } : response
       )),
     }))
+
+    setSavingWeekendId(weekendId)
+    setAvailabilityError('')
+
+    const { data, error } = await supabase
+      .from('availability_responses')
+      .upsert(
+        {
+          weekend_id: weekendId,
+          player_id: currentPlayerId,
+          response: APP_TO_DB_RESPONSE[status],
+          submitted_by_family_id: currentFamilyId,
+        },
+        { onConflict: 'weekend_id,player_id' },
+      )
+      .select('id, weekend_id, player_id, response')
+      .single()
+
+    console.log('[Availability save] Supabase save result/error', data, error)
+
+    if (error) {
+      setWeekendResponses((current) => ({
+        ...current,
+        [weekendId]: previousResponses,
+      }))
+      setAvailabilityError(error.message || 'Unable to save availability response.')
+    } else {
+      const { data: verifiedResponse, error: verifyError } = await supabase
+        .from('availability_responses')
+        .select('id, weekend_id, player_id, response')
+        .eq('weekend_id', weekendId)
+        .eq('player_id', currentPlayerId)
+        .single()
+
+      console.log('[Availability save] Supabase verify result/error', verifiedResponse, verifyError)
+
+      if (verifyError) {
+        setAvailabilityError(verifyError.message || 'Availability saved, but reload verification failed.')
+      }
+
+      const savedStatus = DB_TO_APP_RESPONSE[verifiedResponse?.response ?? data.response] ?? status
+
+      setWeekendResponses((current) => ({
+        ...current,
+        [weekendId]: current[weekendId].map((response) => (
+          response.playerId === currentPlayerId
+            ? { ...response, id: verifiedResponse?.id ?? data.id, status: savedStatus }
+            : response
+        )),
+      }))
+    }
+
+    setSavingWeekendId(null)
   }
 
   return (
@@ -343,19 +653,20 @@ function AvailabilityPage({ currentUser, headerAction }) {
         ))}
       </div>
 
+      {isLoadingAvailability && <p className="availability-message card">Loading availability...</p>}
+      {availabilityError && <p className="availability-message availability-error card">{availabilityError}</p>}
+
       <section className="tournament-list">
-        {visibleWeekends.map((weekend) => {
-          const responses = weekendResponses[weekend.id]
+        {!isLoadingAvailability && visibleWeekends.map((weekend) => {
+          const responses = weekendResponses[weekend.id] ?? []
           const counts = getResponseCounts(responses)
-          const groupedResponses = groupResponses(responses)
-          const responseGroups = Object.entries(groupedResponses).filter(([, group]) => group.length > 0)
           const totalResponses = responses.length
           const fullCount = counts.Yes
           const satCount = counts['Sat Only']
           const sunCount = counts['Sun Only']
           const noCount = counts.No
-          const isExpanded = Boolean(expandedWeekends[weekend.id])
-          const currentResponse = responses.find((response) => response.player === currentPlayer)?.status ?? 'Yes'
+          const currentResponse = responses.find((response) => response.playerId === currentPlayerId)?.status ?? 'Yes'
+          const isSaving = savingWeekendId === weekend.id
 
           return (
             <article className="card tournament-card" key={weekend.id}>
@@ -371,6 +682,7 @@ function AvailabilityPage({ currentUser, headerAction }) {
                       className={currentResponse === 'Yes' ? 'yes-button is-selected' : 'yes-button'}
                       type="button"
                       aria-pressed={currentResponse === 'Yes'}
+                      disabled={isSaving}
                       onClick={() => setPlayerResponse(weekend.id, 'Yes')}
                     >
                       {currentResponse === 'Yes' && <Icon name="check" size={13} />}
@@ -380,6 +692,7 @@ function AvailabilityPage({ currentUser, headerAction }) {
                       className={currentResponse === 'No' ? 'no-button is-selected' : 'no-button'}
                       type="button"
                       aria-pressed={currentResponse === 'No'}
+                      disabled={isSaving}
                       onClick={() => setPlayerResponse(weekend.id, 'No')}
                     >
                       {currentResponse === 'No' && <Icon name="x" size={13} />}
@@ -389,6 +702,7 @@ function AvailabilityPage({ currentUser, headerAction }) {
                       className={currentResponse === 'Sat Only' ? 'partial-button is-selected' : 'partial-button'}
                       type="button"
                       aria-pressed={currentResponse === 'Sat Only'}
+                      disabled={isSaving}
                       onClick={() => setPlayerResponse(weekend.id, 'Sat Only')}
                     >
                       {getResponseLabel('Sat Only')}
@@ -397,6 +711,7 @@ function AvailabilityPage({ currentUser, headerAction }) {
                       className={currentResponse === 'Sun Only' ? 'partial-button is-selected' : 'partial-button'}
                       type="button"
                       aria-pressed={currentResponse === 'Sun Only'}
+                      disabled={isSaving}
                       onClick={() => setPlayerResponse(weekend.id, 'Sun Only')}
                     >
                       {getResponseLabel('Sun Only')}
@@ -420,37 +735,47 @@ function AvailabilityPage({ currentUser, headerAction }) {
                   <button
                     className="toggle-responses-button"
                     type="button"
-                    aria-expanded={isExpanded}
-                    onClick={() => toggleWeekend(weekend.id)}
+                    onClick={() => setSelectedResponseWeekendId(weekend.id)}
                   >
-                    {isExpanded ? 'Hide Responses' : 'Show Responses'}
+                    Show Responses
                   </button>
                 </div>
               </div>
-
-              {isExpanded && (
-                <div className="response-groups">
-                  {responseGroups.map(([status, responses]) => (
-                    <section className="response-group" key={`${weekend.id}-${status}`}>
-                      <h4>{getResponseLabel(status)}</h4>
-                      <div className="response-list">
-                        {responses.map((response) => (
-                          <div className="response-row" key={`${weekend.id}-${response.player}`}>
-                            <span>{response.player}</span>
-                            <strong className={`status ${getStatusClass(response.status)}`}>
-                              {getResponseLabel(response.status)}
-                            </strong>
-                          </div>
-                        ))}
-                      </div>
-                    </section>
-                  ))}
-                </div>
-              )}
             </article>
           )
         })}
       </section>
+
+      {selectedResponseWeekend && (
+        <ModalShell className="participants-modal card" ariaLabel={`${selectedResponseWeekend.dateRange} Responses`}>
+          <div className="edit-panel-header">
+            <div>
+              <p>{selectedResponseWeekend.dateRange}</p>
+              <h3>Responses</h3>
+            </div>
+            <button className="icon-close-button" type="button" onClick={() => setSelectedResponseWeekendId(null)}>
+              Close
+            </button>
+          </div>
+          <div className="response-groups modal-response-groups">
+            {selectedResponseGroups.map(([status, responses]) => (
+              <section className="response-group" key={`${selectedResponseWeekend.id}-${status}`}>
+                <h4>{getResponseLabel(status)}</h4>
+                <div className="response-list">
+                  {responses.map((response) => (
+                    <div className="response-row" key={`${selectedResponseWeekend.id}-${response.player}`}>
+                      <span>{response.player}</span>
+                      <strong className={`status ${getStatusClass(response.status)}`}>
+                        {getResponseLabel(response.status)}
+                      </strong>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            ))}
+          </div>
+        </ModalShell>
+      )}
     </div>
   )
 }
@@ -1235,16 +1560,112 @@ const pages = {
 function App() {
   const [activePage, setActivePage] = useState('availability')
   const [currentUser, setCurrentUser] = useState(null)
+  const [authError, setAuthError] = useState('')
+  const [isAuthLoading, setIsAuthLoading] = useState(true)
   const [rosterPlayers, setRosterPlayers] = useState(players)
+  const [activePlayerId, setActivePlayerId] = useState(null)
   const [isFamilyEditOpen, setIsFamilyEditOpen] = useState(false)
   const CurrentPage = useMemo(() => pages[activePage], [activePage])
 
-  if (!currentUser) {
-    return <LoginScreen rosterPlayers={rosterPlayers} onLogin={setCurrentUser} />
+  const applySession = useCallback(async (session) => {
+    if (!isSupabaseConfigured) {
+      setAuthError('Supabase is not configured.')
+      setCurrentUser(null)
+      setIsAuthLoading(false)
+      return 'Supabase is not configured.'
+    }
+
+    const { user, error } = await loadSupabaseCurrentUser(session, rosterPlayers)
+
+    if (error) {
+      setAuthError(error)
+      setCurrentUser(null)
+      setActivePlayerId(null)
+      setIsAuthLoading(false)
+      return error
+    }
+
+    setAuthError('')
+    setCurrentUser(user)
+    setActivePlayerId((currentId) => (
+      user.familyPlayers.some((player) => player.id === currentId)
+        ? currentId
+        : user.activePlayer.id
+    ))
+    setIsAuthLoading(false)
+    return null
+  }, [rosterPlayers])
+
+  useEffect(() => {
+    let isMounted = true
+
+    async function hydrateSession() {
+      if (!isSupabaseConfigured) {
+        if (isMounted) {
+          setIsAuthLoading(false)
+        }
+        return
+      }
+
+      const { data } = await supabase.auth.getSession()
+
+      if (!isMounted) return
+
+      if (data.session) {
+        await applySession(data.session)
+      } else {
+        setIsAuthLoading(false)
+      }
+    }
+
+    hydrateSession()
+
+    const { data: subscription } = supabase?.auth.onAuthStateChange((_event, session) => {
+      if (session) {
+        applySession(session)
+      } else {
+        setCurrentUser(null)
+        setActivePlayerId(null)
+        setIsAuthLoading(false)
+      }
+    }) ?? { data: null }
+
+    return () => {
+      isMounted = false
+      subscription?.subscription?.unsubscribe()
+    }
+  }, [applySession])
+
+  if (isAuthLoading) {
+    return (
+      <main className="login-screen">
+        <section className="login-card card">
+          <div>
+            <h1>SCV Crushers Navy Team Hub</h1>
+            <p className="login-subtitle">Loading your team account...</p>
+          </div>
+        </section>
+      </main>
+    )
   }
 
-  const activeRosterPlayer = rosterPlayers.find((player) => player.id === currentUser.activePlayer.id) ?? currentUser.activePlayer
-  const resolvedCurrentUser = { ...currentUser, activePlayer: activeRosterPlayer, players: [activeRosterPlayer.name] }
+  if (!currentUser) {
+    return <LoginScreen onLogin={applySession} initialError={authError} />
+  }
+
+  const activePlayer = currentUser.familyPlayers.find((player) => player.id === activePlayerId) ?? currentUser.activePlayer
+  const sampleRosterPlayer = rosterPlayers.find((player) => player.id === activePlayer.id)
+  const activeRosterPlayer = {
+    ...sampleRosterPlayer,
+    ...activePlayer,
+  }
+  const resolvedCurrentUser = {
+    ...currentUser,
+    activePlayer: activeRosterPlayer,
+    familyPlayers: currentUser.familyPlayers,
+    players: [activeRosterPlayer.name],
+    setActivePlayerId,
+  }
 
   function updateRosterPlayer(playerId, field, value) {
     setRosterPlayers((currentPlayers) => (
@@ -1258,6 +1679,9 @@ function App() {
         ...user,
         email: field === 'parentEmail' ? value : user.email,
         players: field === 'name' ? [value] : user.players,
+        familyPlayers: user.familyPlayers.map((player) => (
+          player.id === playerId ? { ...player, [field]: value } : player
+        )),
         activePlayer: {
           ...user.activePlayer,
           [field]: value,
@@ -1271,7 +1695,9 @@ function App() {
       currentUser={resolvedCurrentUser}
       onEditFamily={() => setIsFamilyEditOpen(true)}
       onSignOut={() => {
+        supabase?.auth.signOut()
         setCurrentUser(null)
+        setActivePlayerId(null)
         setActivePage('availability')
       }}
     />
