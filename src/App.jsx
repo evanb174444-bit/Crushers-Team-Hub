@@ -7,7 +7,6 @@ import {
   navItems,
   orderProducts,
   orderWindow,
-  players,
 } from './data/teamData'
 import { isSupabaseConfigured, supabase } from './lib/supabaseClient'
 import './App.css'
@@ -27,6 +26,16 @@ const familyEditFields = [
   ['password', 'Password'],
   ['allergies', 'Player allergies'],
   ['address', 'Address'],
+]
+
+const familyInfoFields = [
+  ['dadName', 'Dad name'],
+  ['dadPhone', 'Dad contact'],
+  ['momName', 'Mom name'],
+  ['momPhone', 'Mom contact'],
+  ['parentEmail', 'Parent email'],
+  ['address', 'Address'],
+  ['password', 'Password'],
 ]
 
 const APP_TO_DB_RESPONSE = {
@@ -268,23 +277,31 @@ function getPlayerName(player) {
   return `${player.first_name} ${player.last_name}`
 }
 
-function mapSupabasePlayerToAppPlayer(player, rosterPlayers) {
-  const name = getPlayerName(player)
-  const samplePlayer = rosterPlayers.find((rosterPlayer) => rosterPlayer.name === name)
-
+function parseFamilyPlayer(player, familyId = null) {
   return {
-    ...samplePlayer,
-    id: samplePlayer?.id ?? player.id,
+    id: player.id,
+    familyId,
     supabaseId: player.id,
-    name,
-    number: player.jersey_number ?? samplePlayer?.number ?? '',
-    bats: player.bats ?? samplePlayer?.bats ?? '',
-    throws: player.throws ?? samplePlayer?.throws ?? '',
-    catches: player.catches == null ? samplePlayer?.catches ?? '' : player.catches ? 'Yes' : '',
+    first_name: player.first_name,
+    last_name: player.last_name,
+    name: getPlayerName(player),
+    number: player.jersey_number ?? '',
+    bats: player.bats ?? '',
+    throws: player.throws ?? '',
+    catches: player.catches == null ? '' : player.catches ? 'Yes' : '',
+    status: player.status,
+    birthdate: player.player_private_details?.birthdate ?? '',
+    allergies: player.player_private_details?.allergies ?? '',
+    dadName: player.dad_name ?? '',
+    dadPhone: player.dad_phone ?? '',
+    momName: player.mom_name ?? '',
+    momPhone: player.mom_phone ?? '',
+    parentEmail: player.parent_email ?? '',
+    address: player.address ?? '',
   }
 }
 
-async function loadSupabaseCurrentUser(session, rosterPlayers) {
+async function loadSupabaseCurrentUser(session) {
   if (!session?.user?.email) {
     return { user: null, error: null }
   }
@@ -296,6 +313,11 @@ async function loadSupabaseCurrentUser(session, rosterPlayers) {
       id,
       email,
       contact_email,
+      address,
+      dad_name,
+      dad_phone,
+      mom_name,
+      mom_phone,
       is_admin,
       family_players(
         player_id,
@@ -308,7 +330,11 @@ async function loadSupabaseCurrentUser(session, rosterPlayers) {
           throws,
           catches,
           sort_order,
-          status
+          status,
+          player_private_details(
+            birthdate,
+            allergies
+          )
         )
       )
     `)
@@ -328,7 +354,7 @@ async function loadSupabaseCurrentUser(session, rosterPlayers) {
     .map((link) => link.players)
     .filter(Boolean)
     .sort((a, b) => (a.sort_order ?? 100) - (b.sort_order ?? 100))
-    .map((player) => mapSupabasePlayerToAppPlayer(player, rosterPlayers))
+    .map((player) => parseFamilyPlayer(player, family.id))
 
   if (familyPlayers.length === 0) {
     await supabase.auth.signOut()
@@ -339,6 +365,11 @@ async function loadSupabaseCurrentUser(session, rosterPlayers) {
     user: {
       email: family.email,
       contactEmail: family.contact_email,
+      address: family.address,
+      dadName: family.dad_name,
+      dadPhone: family.dad_phone,
+      momName: family.mom_name,
+      momPhone: family.mom_phone,
       familyId: family.id,
       isAdmin: family.is_admin,
       familyPlayers,
@@ -347,6 +378,166 @@ async function loadSupabaseCurrentUser(session, rosterPlayers) {
     },
     error: null,
   }
+}
+
+function isFamilyField(field) {
+  return ['dadName', 'dadPhone', 'momName', 'momPhone', 'parentEmail', 'address'].includes(field)
+}
+
+function isPlayerField(field) {
+  return ['name', 'number', 'bats', 'throws', 'catches', 'birthdate', 'allergies', 'status'].includes(field)
+}
+
+function parseName(fullName) {
+  const [first, ...rest] = fullName.trim().split(' ')
+  return {
+    first_name: first ?? '',
+    last_name: rest.join(' ') || '',
+  }
+}
+
+async function persistRosterField({ player, field, value, currentUser }) {
+  const isAdmin = currentUser?.isAdmin
+  const familyId = player.familyId ?? currentUser?.familyId
+
+  if (field === 'password') {
+    if (familyId !== currentUser?.familyId) {
+      throw new Error('Cannot update password for another family from the client.')
+    }
+
+    const { error } = await supabase.auth.updateUser({ password: value })
+    if (error) throw error
+    return
+  }
+
+  if (isFamilyField(field)) {
+    if (!familyId) {
+      throw new Error('Missing family for roster update.')
+    }
+    const payload = {}
+    if (field === 'dadName') payload.dad_name = value || null
+    if (field === 'dadPhone') payload.dad_phone = value || null
+    if (field === 'momName') payload.mom_name = value || null
+    if (field === 'momPhone') payload.mom_phone = value || null
+    if (field === 'address') payload.address = value || null
+    if (field === 'parentEmail') {
+      payload.contact_email = value || null
+      if (familyId === currentUser?.familyId) {
+        payload.email = value || null
+      }
+    }
+
+    const { error } = await supabase.from('families').update(payload).eq('id', familyId)
+    if (error) throw error
+    return
+  }
+
+  if (isPlayerField(field)) {
+    if (!player?.id) {
+      throw new Error('Missing player id for roster update.')
+    }
+
+    const playerPayload = {}
+    const privatePayload = {}
+
+    if (field === 'name') {
+      Object.assign(playerPayload, parseName(value))
+    }
+    if (field === 'number') {
+      playerPayload.jersey_number = value ? Number(value) : null
+    }
+    if (field === 'bats') playerPayload.bats = value || null
+    if (field === 'throws') playerPayload.throws = value || null
+    if (field === 'catches') {
+      if (value === 'Yes') playerPayload.catches = true
+      else if (value === 'No') playerPayload.catches = false
+      else playerPayload.catches = null
+    }
+    if (field === 'status') playerPayload.status = value || null
+    if (field === 'birthdate') privatePayload.birthdate = value || null
+    if (field === 'allergies') privatePayload.allergies = value || null
+
+    if (Object.keys(playerPayload).length > 0) {
+      const { error } = await supabase.from('players').update(playerPayload).eq('id', player.id)
+      if (error) throw error
+    }
+
+    if (Object.keys(privatePayload).length > 0) {
+      const { data: updatedRows, error: updateError } = await supabase
+        .from('player_private_details')
+        .update(privatePayload)
+        .eq('player_id', player.id)
+        .select()
+
+      if (updateError) throw updateError
+
+      if ((updatedRows ?? []).length === 0) {
+        if (isAdmin) {
+          const { error: insertError } = await supabase
+            .from('player_private_details')
+            .insert({ player_id: player.id, ...privatePayload })
+          if (insertError) throw insertError
+        } else {
+          throw new Error('Unable to save player private details. Contact an admin if the player record needs setup.')
+        }
+      }
+    }
+
+    return
+  }
+
+  throw new Error(`Unhandled roster field: ${field}`)
+}
+
+async function updateFamilyField(field, value) {
+  try {
+    await persistRosterField({ player: null, field, value, currentUser })
+    setCurrentUser((user) => ({
+      ...user,
+      contactEmail: field === 'parentEmail' ? value : user.contactEmail,
+      address: field === 'address' ? value : user.address,
+      dadName: field === 'dadName' ? value : user.dadName,
+      dadPhone: field === 'dadPhone' ? value : user.dadPhone,
+      momName: field === 'momName' ? value : user.momName,
+      momPhone: field === 'momPhone' ? value : user.momPhone,
+    }))
+  } catch (error) {
+    console.error('Family update failed', error)
+    setRosterError(error?.message || 'Unable to update family information.')
+  }
+}
+
+function FamilyEditPanel({ editingFamily, fields, modeLabel, onClose, onUpdate }) {
+  return (
+    <ModalShell className="edit-panel family-info-modal" ariaLabel={`Edit ${editingFamily.email}`}>
+      <div className="edit-panel-header">
+        <div>
+          <p>{modeLabel}</p>
+          <h3>{editingFamily.email}</h3>
+        </div>
+        <button className="icon-close-button" type="button" onClick={onClose}>
+          Close
+        </button>
+      </div>
+
+      <div className="roster-field-grid edit-field-grid">
+        {fields.map(([field, label]) => (
+          <label className={['address'].includes(field) ? 'roster-field is-wide' : 'roster-field'} key={`${editingFamily.familyId}-${field}`}>
+            <span>{label}</span>
+            <input
+              type={field === 'parentEmail' ? 'email' : field === 'password' ? 'password' : 'text'}
+              value={editingFamily[field] ?? ''}
+              onChange={(event) => onUpdate(field, event.target.value)}
+            />
+          </label>
+        ))}
+      </div>
+
+      <button className="primary-button" type="button" onClick={onClose}>
+        Save
+      </button>
+    </ModalShell>
+  )
 }
 
 function LoginScreen({ initialError = '', onLogin }) {
@@ -780,13 +971,10 @@ function AvailabilityPage({ currentUser, headerAction }) {
   )
 }
 
-function RosterPage({ currentUser, headerAction, rosterPlayers, updateRosterPlayer }) {
+function RosterPage({ currentUser, headerAction, rosterPlayers, coaches, updateRosterPlayer, onAddPlayer, onRemovePlayer }) {
   const [isCoachMode, setIsCoachMode] = useState(false)
   const [editingPlayerId, setEditingPlayerId] = useState(null)
-  const coaches = [
-    { name: 'Devon Mascarenas', phone: '661-210-8943', email: 'dsddm3@gmail.com' },
-    { name: 'Evan Belfi', phone: '818-427-9904', email: 'evanbelfi@gmail.com' },
-  ]
+  const isAdminUser = Boolean(currentUser?.isAdmin)
   const coachFields = [
     ['status', 'Status'],
     ['name', 'Player name'],
@@ -807,7 +995,7 @@ function RosterPage({ currentUser, headerAction, rosterPlayers, updateRosterPlay
   ]
   const visibleFields = isCoachMode ? coachFields : familyEditFields
   const editingPlayer = rosterPlayers.find((player) => player.id === editingPlayerId)
-  const canEditPlayer = (player) => player.id === currentUser.activePlayer.id
+  const canEditPlayer = (player) => isAdminUser || player.familyId === currentUser.familyId
 
   function updatePlayer(playerId, field, value) {
     updateRosterPlayer(playerId, field, value)
@@ -1562,7 +1750,10 @@ function App() {
   const [currentUser, setCurrentUser] = useState(null)
   const [authError, setAuthError] = useState('')
   const [isAuthLoading, setIsAuthLoading] = useState(true)
-  const [rosterPlayers, setRosterPlayers] = useState(players)
+  const [rosterPlayers, setRosterPlayers] = useState([])
+  const [coaches, setCoaches] = useState([])
+  const [isRosterLoading, setIsRosterLoading] = useState(true)
+  const [rosterError, setRosterError] = useState('')
   const [activePlayerId, setActivePlayerId] = useState(null)
   const [isFamilyEditOpen, setIsFamilyEditOpen] = useState(false)
   const CurrentPage = useMemo(() => pages[activePage], [activePage])
@@ -1575,7 +1766,7 @@ function App() {
       return 'Supabase is not configured.'
     }
 
-    const { user, error } = await loadSupabaseCurrentUser(session, rosterPlayers)
+    const { user, error } = await loadSupabaseCurrentUser(session)
 
     if (error) {
       setAuthError(error)
@@ -1594,7 +1785,7 @@ function App() {
     ))
     setIsAuthLoading(false)
     return null
-  }, [rosterPlayers])
+  }, [])
 
   useEffect(() => {
     let isMounted = true
@@ -1636,6 +1827,102 @@ function App() {
     }
   }, [applySession])
 
+  useEffect(() => {
+    let isMounted = true
+
+    async function loadRosterData() {
+      if (!currentUser) {
+        return
+      }
+
+      setRosterError('')
+      setIsRosterLoading(true)
+
+      try {
+        const [{ data: playersData, error: playersError }, { data: coachesData, error: coachesError }] = await Promise.all([
+          supabase
+            .from('players')
+            .select(`
+              id,
+              first_name,
+              last_name,
+              jersey_number,
+              bats,
+              throws,
+              catches,
+              sort_order,
+              status,
+              player_private_details(
+                birthdate,
+                allergies
+              ),
+              family_players(
+                family_id,
+                families(
+                  id,
+                  dad_name,
+                  dad_phone,
+                  mom_name,
+                  mom_phone,
+                  contact_email,
+                  address
+                )
+              )
+            `)
+            .order('sort_order', { ascending: true }),
+          supabase
+            .from('coaches')
+            .select('id,name,phone,email')
+            .order('sort_order', { ascending: true }),
+        ])
+
+        if (playersError) throw playersError
+        if (coachesError) throw coachesError
+
+        const parsedPlayers = (playersData ?? []).map((player) => {
+          const family = player.family_players?.[0]?.families
+          return {
+            id: player.id,
+            supabaseId: player.id,
+            familyId: player.family_players?.[0]?.family_id ?? null,
+            first_name: player.first_name,
+            last_name: player.last_name,
+            name: getPlayerName(player),
+            number: player.jersey_number ?? '',
+            bats: player.bats ?? '',
+            throws: player.throws ?? '',
+            catches: player.catches == null ? '' : player.catches ? 'Yes' : '',
+            status: player.status,
+            birthdate: player.player_private_details?.birthdate ?? '',
+            allergies: player.player_private_details?.allergies ?? '',
+            dadName: family?.dad_name ?? '',
+            dadPhone: family?.dad_phone ?? '',
+            momName: family?.mom_name ?? '',
+            momPhone: family?.mom_phone ?? '',
+            parentEmail: family?.contact_email ?? '',
+            address: family?.address ?? '',
+          }
+        })
+
+        if (!isMounted) return
+        setRosterPlayers(parsedPlayers)
+        setCoaches(coachesData ?? [])
+      } catch (error) {
+        if (!isMounted) return
+        setRosterError(error?.message || 'Unable to load roster from Supabase.')
+      } finally {
+        if (!isMounted) return
+        setIsRosterLoading(false)
+      }
+    }
+
+    loadRosterData()
+
+    return () => {
+      isMounted = false
+    }
+  }, [currentUser])
+
   if (isAuthLoading) {
     return (
       <main className="login-screen">
@@ -1667,26 +1954,33 @@ function App() {
     setActivePlayerId,
   }
 
-  function updateRosterPlayer(playerId, field, value) {
+  async function updateRosterPlayer(playerId, field, value) {
     setRosterPlayers((currentPlayers) => (
       currentPlayers.map((player) => (
         player.id === playerId ? { ...player, [field]: value } : player
       ))
     ))
 
-    if (currentUser.activePlayer.id === playerId) {
-      setCurrentUser((user) => ({
-        ...user,
-        email: field === 'parentEmail' ? value : user.email,
-        players: field === 'name' ? [value] : user.players,
-        familyPlayers: user.familyPlayers.map((player) => (
-          player.id === playerId ? { ...player, [field]: value } : player
-        )),
-        activePlayer: {
-          ...user.activePlayer,
-          [field]: value,
-        },
-      }))
+    try {
+      const player = rosterPlayers.find((candidate) => candidate.id === playerId)
+      await persistRosterField({ player, field, value, currentUser })
+
+      if (currentUser.activePlayer.id === playerId) {
+        setCurrentUser((user) => ({
+          ...user,
+          players: field === 'name' ? [value] : user.players,
+          familyPlayers: user.familyPlayers.map((player) => (
+            player.id === playerId ? { ...player, [field]: value } : player
+          )),
+          activePlayer: {
+            ...user.activePlayer,
+            [field]: value,
+          },
+        }))
+      }
+    } catch (error) {
+      console.error('Roster save failed', error)
+      setRosterError(error?.message || 'Unable to save roster update.')
     }
   }
 
@@ -1712,15 +2006,53 @@ function App() {
         currentUser={resolvedCurrentUser}
         headerAction={headerAction}
         rosterPlayers={rosterPlayers}
+        coaches={coaches}
         updateRosterPlayer={updateRosterPlayer}
+        onAddPlayer={async () => {
+          const defaultName = 'New Player'
+          const { data, error } = await supabase.from('players').insert({ first_name: 'New', last_name: 'Player', status: 'active' }).select('*').single()
+          if (error) {
+            setRosterError(error.message)
+            return
+          }
+          setRosterPlayers((current) => ([...current, {
+            id: data.id,
+            supabaseId: data.id,
+            familyId: null,
+            first_name: data.first_name,
+            last_name: data.last_name,
+            name: getPlayerName(data),
+            number: data.jersey_number ?? '',
+            bats: data.bats ?? '',
+            throws: data.throws ?? '',
+            catches: data.catches == null ? '' : data.catches ? 'Yes' : '',
+            status: data.status,
+            birthdate: '',
+            allergies: '',
+            dadName: '',
+            dadPhone: '',
+            momName: '',
+            momPhone: '',
+            parentEmail: '',
+            address: '',
+          }]))
+        }}
+        onRemovePlayer={async (playerId) => {
+          const { error } = await supabase.from('players').delete().eq('id', playerId)
+          if (error) {
+            setRosterError(error.message)
+            return
+          }
+          setRosterPlayers((current) => current.filter((player) => player.id !== playerId))
+        }}
       />
       {isFamilyEditOpen && (
-        <RosterEditPanel
-          editingPlayer={activeRosterPlayer}
-          fields={familyEditFields}
+        <FamilyEditPanel
+          editingFamily={resolvedCurrentUser}
+          fields={familyInfoFields}
           modeLabel="Family Information"
           onClose={() => setIsFamilyEditOpen(false)}
-          onUpdate={updateRosterPlayer}
+          onUpdate={updateFamilyField}
         />
       )}
     </AppShell>
