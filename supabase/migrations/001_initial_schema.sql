@@ -400,10 +400,10 @@ alter table public.order_products enable row level security;
 alter table public.orders enable row level security;
 alter table public.order_items enable row level security;
 
-create policy "families_select_own_or_admin"
+create policy "families_select_all_authenticated"
 on public.families for select
 to authenticated
-using (id = public.current_family_id() or public.is_admin());
+using (true);
 
 create policy "families_update_own_or_admin"
 on public.families for update
@@ -502,10 +502,10 @@ to authenticated
 using (public.is_admin())
 with check (public.is_admin());
 
-create policy "family_players_select_own_or_admin"
+create policy "family_players_select_all_authenticated"
 on public.family_players for select
 to authenticated
-using (family_id = public.current_family_id() or public.is_admin());
+using (true);
 
 create policy "family_players_admin_all"
 on public.family_players for all
