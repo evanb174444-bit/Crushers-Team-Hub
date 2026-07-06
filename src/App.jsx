@@ -301,12 +301,15 @@ function parseFamilyPlayer(player, familyId = null) {
   }
 }
 
+const ADMIN_EMAILS = ['evanbelfi@gmail.com', 'dsddm3@gmail.com']
+
 async function loadSupabaseCurrentUser(session) {
   if (!session?.user?.email) {
     return { user: null, error: null }
   }
 
   const email = session.user.email.trim().toLowerCase()
+  const isAdminEmail = ADMIN_EMAILS.includes(email)
   const { data: family, error } = await supabase
     .from('families')
     .select(`
@@ -318,7 +321,6 @@ async function loadSupabaseCurrentUser(session) {
       dad_phone,
       mom_name,
       mom_phone,
-      is_admin,
       family_players(
         player_id,
         players(
@@ -371,7 +373,7 @@ async function loadSupabaseCurrentUser(session) {
       momName: family.mom_name,
       momPhone: family.mom_phone,
       familyId: family.id,
-      isAdmin: family.is_admin,
+      isAdmin: isAdminEmail,
       familyPlayers,
       players: familyPlayers.map((player) => player.name),
       activePlayer: familyPlayers[0],
@@ -975,6 +977,13 @@ function RosterPage({ currentUser, headerAction, rosterPlayers, coaches, updateR
   const [isCoachMode, setIsCoachMode] = useState(false)
   const [editingPlayerId, setEditingPlayerId] = useState(null)
   const isAdminUser = Boolean(currentUser?.isAdmin)
+
+  useEffect(() => {
+    if (!isAdminUser && isCoachMode) {
+      setIsCoachMode(false)
+    }
+  }, [isAdminUser, isCoachMode])
+
   const coachFields = [
     ['status', 'Status'],
     ['name', 'Player name'],
@@ -993,9 +1002,9 @@ function RosterPage({ currentUser, headerAction, rosterPlayers, coaches, updateR
     ['address', 'Address'],
     ['id', 'Internal ID'],
   ]
-  const visibleFields = isCoachMode ? coachFields : familyEditFields
+  const visibleFields = isAdminUser && isCoachMode ? coachFields : familyEditFields
   const editingPlayer = rosterPlayers.find((player) => player.id === editingPlayerId)
-  const canEditPlayer = (player) => isAdminUser || player.familyId === currentUser.familyId
+  const canEditPlayer = (player) => player.familyId === currentUser.familyId
 
   function updatePlayer(playerId, field, value) {
     updateRosterPlayer(playerId, field, value)
@@ -1032,14 +1041,18 @@ function RosterPage({ currentUser, headerAction, rosterPlayers, coaches, updateR
       <section className="roster-section">
         <div className="roster-section-heading">
           <h3>Players</h3>
-          <button
-            className={isCoachMode ? 'coach-toggle is-active' : 'coach-toggle'}
-            type="button"
-            aria-pressed={isCoachMode}
-            onClick={() => setIsCoachMode((current) => !current)}
-          >
-            {isCoachMode ? 'Coach Mode On' : 'Parent View'}
-          </button>
+          {isAdminUser ? (
+            <button
+              className={isCoachMode ? 'coach-toggle is-active' : 'coach-toggle'}
+              type="button"
+              aria-pressed={isCoachMode}
+              onClick={() => setIsCoachMode((current) => !current)}
+            >
+              {isCoachMode ? 'Coach Mode On' : 'Parent View'}
+            </button>
+          ) : (
+            <span className="coach-toggle coach-toggle-disabled">Parent View</span>
+          )}
         </div>
         <section className="roster-table-card card">
         <div className={isCoachMode ? 'roster-table is-coach' : 'roster-table'}>
@@ -1052,7 +1065,7 @@ function RosterPage({ currentUser, headerAction, rosterPlayers, coaches, updateR
             <span>Dad</span>
             <span>Mom</span>
             <span>Parent Email</span>
-            {isCoachMode && (
+            {isAdminUser && isCoachMode && (
               <>
                 <span>Birthdate</span>
                 <span>Dad Contact</span>
@@ -1074,7 +1087,7 @@ function RosterPage({ currentUser, headerAction, rosterPlayers, coaches, updateR
               <span>{player.dadName || '—'}</span>
               <span>{player.momName || '—'}</span>
               <span>{player.parentEmail || '—'}</span>
-              {isCoachMode && (
+              {isAdminUser && isCoachMode && (
                 <>
                   <span>{player.birthdate || '—'}</span>
                   <span>{player.dadPhone || '—'}</span>
@@ -1155,7 +1168,7 @@ function ModalShell({ ariaLabel, children, className }) {
 
 function OrderCenterPage({ currentUser, headerAction }) {
   const orderingPlayer = currentUser.players[0]
-  const isAdminUser = ['evanbelfi@gmail.com', 'dsddm3@gmail.com'].includes(currentUser.email.toLowerCase())
+  const isAdminUser = Boolean(currentUser?.isAdmin)
   const [storeStatus, setStoreStatus] = useState('CLOSED')
   const [isCoachMode, setIsCoachMode] = useState(false)
   const [cartItems, setCartItems] = useState([])
@@ -1839,70 +1852,118 @@ function App() {
       setIsRosterLoading(true)
 
       try {
-        const [{ data: playersData, error: playersError }, { data: coachesData, error: coachesError }] = await Promise.all([
-          supabase
-            .from('players')
-            .select(`
-              id,
-              first_name,
-              last_name,
-              jersey_number,
-              bats,
-              throws,
-              catches,
-              sort_order,
-              status,
-              player_private_details(
-                birthdate,
-                allergies
-              ),
-              family_players(
-                family_id,
-                families(
-                  id,
-                  dad_name,
-                  dad_phone,
-                  mom_name,
-                  mom_phone,
-                  contact_email,
-                  address
-                )
-              )
-            `)
-            .order('sort_order', { ascending: true }),
+        const [{ data: coachesData, error: coachesError }, { data: rosterData, error: rosterError }] = await Promise.all([
           supabase
             .from('coaches')
             .select('id,name,phone,email')
             .order('sort_order', { ascending: true }),
+          currentUser.isAdmin
+            ? supabase
+                .from('players')
+                .select(`
+                  id,
+                  first_name,
+                  last_name,
+                  jersey_number,
+                  bats,
+                  throws,
+                  catches,
+                  sort_order,
+                  status,
+                  player_private_details(
+                    birthdate,
+                    allergies
+                  ),
+                  family_players(
+                    family_id,
+                    families(
+                      id,
+                      dad_name,
+                      dad_phone,
+                      mom_name,
+                      mom_phone,
+                      contact_email,
+                      address
+                    )
+                  )
+                `)
+                .order('sort_order', { ascending: true })
+            : supabase
+                .from('roster_directory')
+                .select(`
+                  player_id,
+                  player_name,
+                  first_name,
+                  last_name,
+                  jersey_number,
+                  bats,
+                  throws,
+                  catches,
+                  status,
+                  family_id,
+                  dad_name,
+                  mom_name,
+                  parent_email,
+                  sort_order
+                `)
+                .order('sort_order', { ascending: true }),
         ])
 
-        if (playersError) throw playersError
         if (coachesError) throw coachesError
+        if (rosterError) throw rosterError
 
-        const parsedPlayers = (playersData ?? []).map((player) => {
-          const family = player.family_players?.[0]?.families
-          return {
-            id: player.id,
-            supabaseId: player.id,
-            familyId: player.family_players?.[0]?.family_id ?? null,
-            first_name: player.first_name,
-            last_name: player.last_name,
-            name: getPlayerName(player),
-            number: player.jersey_number ?? '',
-            bats: player.bats ?? '',
-            throws: player.throws ?? '',
-            catches: player.catches == null ? '' : player.catches ? 'Yes' : '',
-            status: player.status,
-            birthdate: player.player_private_details?.birthdate ?? '',
-            allergies: player.player_private_details?.allergies ?? '',
-            dadName: family?.dad_name ?? '',
-            dadPhone: family?.dad_phone ?? '',
-            momName: family?.mom_name ?? '',
-            momPhone: family?.mom_phone ?? '',
-            parentEmail: family?.contact_email ?? '',
-            address: family?.address ?? '',
-          }
-        })
+        const parsedPlayers = currentUser.isAdmin
+          ? (rosterData ?? []).map((player) => {
+              const family = player.family_players?.[0]?.families
+              return {
+                id: player.id,
+                supabaseId: player.id,
+                familyId: player.family_players?.[0]?.family_id ?? null,
+                first_name: player.first_name,
+                last_name: player.last_name,
+                name: getPlayerName(player),
+                number: player.jersey_number ?? '',
+                bats: player.bats ?? '',
+                throws: player.throws ?? '',
+                catches: player.catches == null ? '' : player.catches ? 'Yes' : '',
+                status: player.status,
+                birthdate: player.player_private_details?.birthdate ?? '',
+                allergies: player.player_private_details?.allergies ?? '',
+                dadName: family?.dad_name ?? '',
+                dadPhone: family?.dad_phone ?? '',
+                momName: family?.mom_name ?? '',
+                momPhone: family?.mom_phone ?? '',
+                parentEmail: family?.contact_email ?? '',
+                address: family?.address ?? '',
+              }
+            })
+          : (rosterData ?? []).map((player) => {
+              const ownsPlayer = player.family_id === currentUser.familyId
+              const ownPlayer = ownsPlayer
+                ? currentUser.familyPlayers.find((p) => p.id === player.player_id)
+                : null
+              return {
+                id: player.player_id,
+                supabaseId: player.player_id,
+                familyId: player.family_id ?? null,
+                first_name: player.first_name,
+                last_name: player.last_name,
+                name: player.player_name,
+                number: player.jersey_number ?? '',
+                bats: player.bats ?? '',
+                throws: player.throws ?? '',
+                catches: player.catches == null ? '' : player.catches ? 'Yes' : '',
+                status: player.status,
+                birthdate: ownsPlayer ? ownPlayer?.birthdate ?? '' : '',
+                allergies: ownsPlayer ? ownPlayer?.allergies ?? '' : '',
+                dadName: player.dad_name ?? '',
+                dadPhone: ownsPlayer ? currentUser.dadPhone ?? '' : '',
+                momName: player.mom_name ?? '',
+                momPhone: ownsPlayer ? currentUser.momPhone ?? '' : '',
+                parentEmail: player.parent_email ?? '',
+                address: ownsPlayer ? currentUser.address ?? '' : '',
+              }
+            })
 
         if (!isMounted) return
         setRosterPlayers(parsedPlayers)
