@@ -973,7 +973,7 @@ function AvailabilityPage({ currentUser, headerAction }) {
   )
 }
 
-function RosterPage({ currentUser, headerAction, rosterPlayers, coaches, updateRosterPlayer, onAddPlayer, onRemovePlayer }) {
+function RosterPage({ currentUser, headerAction, rosterPlayers, coaches, updateRosterPlayer, onAddPlayer, onRemovePlayer, externalEditPlayerId, onExternalEditClose }) {
   const [isCoachMode, setIsCoachMode] = useState(false)
   const [editingPlayerId, setEditingPlayerId] = useState(null)
   const isAdminUser = Boolean(currentUser?.isAdmin)
@@ -983,6 +983,12 @@ function RosterPage({ currentUser, headerAction, rosterPlayers, coaches, updateR
       setIsCoachMode(false)
     }
   }, [isAdminUser, isCoachMode])
+
+  useEffect(() => {
+    if (externalEditPlayerId) {
+      setEditingPlayerId(externalEditPlayerId)
+    }
+  }, [externalEditPlayerId])
 
   const coachFields = [
     ['status', 'Status'],
@@ -1114,7 +1120,10 @@ function RosterPage({ currentUser, headerAction, rosterPlayers, coaches, updateR
           editingPlayer={editingPlayer}
           fields={visibleFields}
           modeLabel={isCoachMode ? 'Coach Edit' : 'Parent Edit'}
-          onClose={() => setEditingPlayerId(null)}
+          onClose={() => {
+            setEditingPlayerId(null)
+            if (onExternalEditClose) onExternalEditClose()
+          }}
           onUpdate={updatePlayer}
         />
       )}
@@ -1768,7 +1777,7 @@ function App() {
   const [isRosterLoading, setIsRosterLoading] = useState(true)
   const [rosterError, setRosterError] = useState('')
   const [activePlayerId, setActivePlayerId] = useState(null)
-  const [isFamilyEditOpen, setIsFamilyEditOpen] = useState(false)
+  const [externalEditPlayerId, setExternalEditPlayerId] = useState(null)
   const CurrentPage = useMemo(() => pages[activePage], [activePage])
 
   const applySession = useCallback(async (session) => {
@@ -2048,7 +2057,7 @@ function App() {
   const headerAction = (
     <AccountDropdown
       currentUser={resolvedCurrentUser}
-      onEditFamily={() => setIsFamilyEditOpen(true)}
+      onEditFamily={() => setExternalEditPlayerId(resolvedCurrentUser.activePlayer.id)}
       onSignOut={() => {
         supabase?.auth.signOut()
         setCurrentUser(null)
@@ -2069,6 +2078,8 @@ function App() {
         rosterPlayers={rosterPlayers}
         coaches={coaches}
         updateRosterPlayer={updateRosterPlayer}
+        externalEditPlayerId={externalEditPlayerId}
+        onExternalEditClose={() => setExternalEditPlayerId(null)}
         onAddPlayer={async () => {
           const defaultName = 'New Player'
           const { data, error } = await supabase.from('players').insert({ first_name: 'New', last_name: 'Player', status: 'active' }).select('*').single()
@@ -2107,15 +2118,7 @@ function App() {
           setRosterPlayers((current) => current.filter((player) => player.id !== playerId))
         }}
       />
-      {isFamilyEditOpen && (
-        <FamilyEditPanel
-          editingFamily={resolvedCurrentUser}
-          fields={familyInfoFields}
-          modeLabel="Family Information"
-          onClose={() => setIsFamilyEditOpen(false)}
-          onUpdate={updateFamilyField}
-        />
-      )}
+      {/* Family edit now uses the roster editor; header action opens RosterEditPanel for the active player. */}
     </AppShell>
   )
 }
